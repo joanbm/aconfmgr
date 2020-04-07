@@ -534,85 +534,103 @@ BEGIN {
 
 	LogEnter 'Processing found files...\n'
 
+	local max_nb_jobs
+	max_nb_jobs=$(nproc)
+
 	local i
 	for ((i=0; i<${#found_files[*]}; i++))
 	do
+		# Limit the amount of parallel jobs
+		# https://stackoverflow.com/a/27568120/2580621
+		local running_jobs
+		while mapfile -t running_jobs < <(jobs -pr) && ((${#running_jobs[@]}>=max_nb_jobs));
+		do
+			wait -n
+		done
+
 		Log '%s/%s...\r' "$(Color G "$i")" "$(Color G "${#found_files[*]}")"
 
-		local  file="${found_files[$i]}"
-		local  type="${found_file_types[$i]}"
-		local  size="${found_file_sizes[$i]}"
-		local  mode="${found_file_modes[$i]}"
-		local owner="${found_file_owners[$i]}"
-		local group="${found_file_groups[$i]}"
+		(
+			local  file="${found_files[$i]}"
+			local  type="${found_file_types[$i]}"
+			local  size="${found_file_sizes[$i]}"
+			local  mode="${found_file_modes[$i]}"
+			local owner="${found_file_owners[$i]}"
+			local group="${found_file_groups[$i]}"
 
-		if [[ "${ignored_dirs[$file]-n}" == y ]]
-		then
-			continue
-		fi
-
-		if [[ -n "${found_file_edited[$file]+x}" ]]
-		then
-			mkdir --parents "$(dirname "$system_dir"/files/"$file")"
-			if [[ "$type" == "symbolic link" ]]
+			if [[ "${ignored_dirs[$file]-n}" == y ]]
 			then
-				ln -s "$(sudo readlink "$file")" "$system_dir"/files/"$file"
-			elif [[ "$type" == "regular file" || "$type" == "regular empty file" ]]
-			then
-				if [[ $size -gt $warn_size_threshold ]]
-				then
-					Log '%s: copying large file %s (%s bytes). Add %s to configuration to ignore.\n' "$(Color Y "Warning")" "$(Color C "%q" "$file")" "$(Color G "$size")" "$(Color Y "IgnorePath %q" "$file")"
-				fi
-				# shellcheck disable=SC2024
-				sudo cat "$file" > "$system_dir"/files/"$file"
-			elif [[ "$type" == "directory" ]]
-			then
-				mkdir --parents "$system_dir"/files/"$file"
-			else
-				Log '%s: Skipping file %s with unknown type %s. Add %s to configuration to ignore.\n' "$(Color Y "Warning")" "$(Color C "%q" "$file")" "$(Color G "$type")" "$(Color Y "IgnorePath %q" "$file")"
-				continue
+				exit 0
 			fi
-		fi
 
-		{
-			local prop
-			for prop in mode owner group
-			do
-				# Ignore mode "changes" in symbolic links
-				# If a file's type changes, a change in mode can be reported too.
-				# But, symbolic links cannot have a mode, so ignore this change.
-				if [[ "$type" == "symbolic link" && "$prop" == mode ]]
+			if [[ -n "${found_file_edited[$file]+x}" ]]
+			then
+				mkdir --parents "$(dirname "$system_dir"/files/"$file")"
+				if [[ "$type" == "symbolic link" ]]
 				then
-					continue
-				fi
-
-				local value
-				eval "value=\$$prop"
-
-				local default_value
-
-				if [[ $i -lt $lost_file_count ]]
+					ln -s "$(sudo readlink "$file")" "$system_dir"/files/"$file"
+				elif [[ "$type" == "regular file" || "$type" == "regular empty file" ]]
 				then
-					# For lost files, the default owner/group is root/root,
-					# and the default mode depends on the type.
-					# Let AconfDefaultFileProp get the correct default value for us.
-
-					default_value=
+					if [[ $size -gt $warn_size_threshold ]]
+					then
+						Log '%s: copying large file %s (%s bytes). Add %s to configuration to ignore.\n' "$(Color Y "Warning")" "$(Color C "%q" "$file")" "$(Color G "$size")" "$(Color Y "IgnorePath %q" "$file")"
+					fi
+					# shellcheck disable=SC2024
+					sudo cat "$file" > "$system_dir"/files/"$file"
+				elif [[ "$type" == "directory" ]]
+				then
+					mkdir --parents "$system_dir"/files/"$file"
 				else
-					# For owned files, we assume that the defaults are the
-					# files' current properties, unless paccheck said
-					# otherwise.
-
-					default_value=$value
+					Log '%s: Skipping file %s with unknown type %s. Add %s to configuration to ignore.\n' "$(Color Y "Warning")" "$(Color C "%q" "$file")" "$(Color G "$type")" "$(Color Y "IgnorePath %q" "$file")"
+					exit 0
 				fi
+			fi
 
-				local orig_value
-				orig_value=$(AconfDefaultFileProp "$file" "$prop" "$type" "$default_value")
+			file_props_output="$({
+				local prop
+				for prop in mode owner group
+				do
+					# Ignore mode "changes" in symbolic links
+					# If a file's type changes, a change in mode can be reported too.
+					# But, symbolic links cannot have a mode, so ignore this change.
+					if [[ "$type" == "symbolic link" && "$prop" == mode ]]
+					then
+						exit 0
+					fi
 
-				[[ "$value" == "$orig_value" ]] || printf '%s\t%s\t%q\n' "$prop" "$value" "$file"
-			done
-		} >> "$system_dir"/file-props.txt
+					local value
+					eval "value=\$$prop"
+
+					local default_value
+
+					if [[ $i -lt $lost_file_count ]]
+					then
+						# For lost files, the default owner/group is root/root,
+						# and the default mode depends on the type.
+						# Let AconfDefaultFileProp get the correct default value for us.
+
+						default_value=
+					else
+						# For owned files, we assume that the defaults are the
+						# files' current properties, unless paccheck said
+						# otherwise.
+
+						default_value=$value
+					fi
+
+					local orig_value
+					orig_value=$(AconfDefaultFileProp "$file" "$prop" "$type" "$default_value")
+
+					[[ "$value" == "$orig_value" ]] || printf '%s\t%s\t%q\n' "$prop" "$value" "$file"
+				done
+				echo . # To preserve trailing newline: https://unix.stackexchange.com/a/383411/404656
+			})"
+			file_props_output=${file_props_output%.}
+			flock -s 200
+			echo -n "$file_props_output" >> "$system_dir"/file-props.txt
+		) 200>"$tmp_dir"/file-props-lock &
 	done
+	wait
 
 	LogLeave # Processing found files
 
