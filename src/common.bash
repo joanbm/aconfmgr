@@ -72,6 +72,9 @@ warn_size_threshold=$((10*1024*1024)) # Warn on copying files bigger than this
 warn_file_count_threshold=1000        # Warn on finding this many lost files
 warn_tmp_df_threshold=$((1024*1024))  # Warn on error if free space in $tmp_dir is below this
 
+# Maximum length of a command line argument set by the Linux kernel (MAX_ARG_STRLEN)
+max_arg_strlen=131072
+
 ####################################################################################################
 
 function LogLeaveDirStats() {
@@ -200,7 +203,26 @@ function AconfCreateFindIgnoreArgs() {
 			sed 's|[^*abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/ ]|[&]|g; s|\*|.*|g' | \
 			mapfile -t ignore_regexps
 
-		ignore_args_var+=(-regex "$( IFS='|' ; echo "${ignore_regexps[*]}" )" -o)
+		# Here ideally, we just want to combine all regexes together with '|'
+		# in between. However, since Linux has a maximum length for a command line
+		# argument (see MAX_ARG_STRLEN), we need to make sure not to exceed
+		# this limit while doing so, using multiple arguments if necessary
+		local ignore_path_regexp
+		local combined_regex=""
+		for ignore_path_regexp in "${ignore_regexps[@]}"; do
+			if [[ -n "$combined_regex" && \
+			      $(( ${#combined_regex} + 1 + ${#ignore_path_regexp} )) -lt $max_arg_strlen ]]; then
+				combined_regex+="|$ignore_path_regexp"
+			else
+				if [[ -n "$combined_regex" ]]; then
+					ignore_args+=(-regex "$combined_regex" -o)
+				fi
+				combined_regex="$ignore_path_regexp"
+			fi
+		done
+		if [[ -n "$combined_regex" ]]; then
+			ignore_args+=(-regex "$combined_regex" -o)
+		fi
 	fi
 
 	ignore_args_var+=(-false)

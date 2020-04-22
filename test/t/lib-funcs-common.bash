@@ -96,6 +96,9 @@ test_globals_whitelist=(
 	warn_size_threshold
 	warn_tmp_df_threshold
 
+	# Limits
+	max_arg_strlen
+
 	# Internal state (paths)
 	config_dir
 	output_dir
